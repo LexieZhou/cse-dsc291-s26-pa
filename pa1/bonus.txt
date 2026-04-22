@@ -1,0 +1,68 @@
+1. Time complexity per decoding step without KV cache
+--------------------------------------------------
+
+  - Q, K, V projections (3 x matmul d*d)   : O(t * d^2)
+  - Attention scores  Q K^T                : O(t^2 * d)
+  - Softmax over scores                    : O(t^2)
+  - Attention output  (attn @ V)           : O(t^2 * d)
+  - Output projection W_O                  : O(t * d^2)
+  - Feed-forward (two matmuls)             : O(t * d * d_ff) = O(t * d^2)
+  - LM head  h @ W_head                    : O(d * V)
+
+Thus, the total per-step complexity is:
+
+      T_step(t) = O( t * d^2  +  t^2 * d  + d * V )
+
+For fixed vocab and d, this simplifies to
+
+      T_step(t) = O( t * d^2 + t^2 * d ).
+
+The dominant term is O(t^2 d) from self-attention.
+
+
+2. Total time to generate T tokens without KV cache
+------------------------------------------------
+The full forward pass is repeated for t = 1 to T:
+
+      T_total = sum_{t=0..T-1} T_step(t)
+              = O( d^2 * sum t  +  d * sum t^2 )
+              = O( T^2 * d^2  +  T^3 * d )
+
+If d is treated as fixed, this becomes O(T^3).
+
+
+3. Space complexity during generation without KV cache
+---------------------------------------------------
+Peak memory at the final step (context length T):
+
+  - Parameters (fixed)                    : O(d^2 + d_ff * d + V * d)
+  - Hidden states / activations           : O(T * d)
+  - Attention score matrix (T x T)        : O(T^2)
+  - Token / position one-hots, logits     : O(T * V)
+
+The dominant terms are the attention matrix O(T^2) and hidden states O(T * d).
+The logits term O(T * V) can also be included depending on implementation.
+
+Thus, the space complexity is:
+
+    S_total = O(t^2 + t d + t V)
+
+If V is treated as fixed or logits are not stored for all tokens, this simplifies to:
+
+    S_total = O(t^2 + t d)
+
+
+4. Reducing repeated computation: KV cache
+------------------------------------------
+Yes. We can store the key and value tensors for previous tokens
+and reuse them at later decoding steps, instead of recomputing them from scratch.
+
+With KV cache, at step t we only compute projections for the new token and
+attend to the cached keys/values. This changes:
+- per-step time from O(t^2 d + t d^2) to O(t d + d^2)
+- total time over T generated tokens from cubic to quadratic in T:
+      O(T^2 d + T d^2)
+- cache memory adds O(t d) space for stored keys/values
+
+Thus, KV caching reduces the asymptotic time complexity of generation
+from cubic to quadratic in T, significantly reducing repeated computation.
