@@ -79,7 +79,39 @@ class Communicator(object):
           - For non-root processes: one send and one receive.
           - For the root process: (n-1) receives and (n-1) sends.
         """
-        #TODO: Your code here
+        assert src_array.size == dest_array.size
+
+        rank = self.comm.Get_rank()
+        size = self.comm.Get_size()
+        src_array_byte = src_array.itemsize * src_array.size
+
+        if op == MPI.SUM:
+            reduce_op = np.add
+        elif op == MPI.MIN:
+            reduce_op = np.minimum
+        elif op == MPI.MAX:
+            reduce_op = np.maximum
+        else:
+            raise ValueError(f"Unsupported reduction operator: {op}")
+
+        if size == 1:
+            np.copyto(dest_array, src_array)
+            return
+
+        if rank == 0:
+            np.copyto(dest_array, src_array)
+            recv_buf = np.empty_like(src_array)
+            for src in range(1, size):
+                self.comm.Recv(recv_buf, source=src)
+                reduce_op(dest_array, recv_buf, out=dest_array)
+                self.total_bytes_transferred += src_array_byte
+            for dst in range(1, size):
+                self.comm.Send(dest_array, dest=dst)
+                self.total_bytes_transferred += src_array_byte
+        else:
+            self.comm.Send(src_array, dest=0)
+            self.comm.Recv(dest_array, source=0)
+            self.total_bytes_transferred += src_array_byte * 2
 
     def myAlltoall(self, src_array, dest_array):
         """
@@ -99,4 +131,32 @@ class Communicator(object):
             
         The total data transferred is updated for each pairwise exchange.
         """
-        #TODO: Your code here
+        rank = self.comm.Get_rank()
+        nprocs = self.comm.Get_size()
+
+        assert src_array.size % nprocs == 0, (
+            "src_array size must be divisible by the number of processes"
+        )
+        assert dest_array.size % nprocs == 0, (
+            "dest_array size must be divisible by the number of processes"
+        )
+
+        seg_count = src_array.size // nprocs
+        seg_bytes = src_array.itemsize * seg_count
+
+        src_flat = src_array.reshape(-1)
+        dest_flat = dest_array.reshape(-1)
+
+        for step in range(nprocs):
+            send_to = (rank + step) % nprocs
+            recv_from = (rank - step) % nprocs
+            send_seg = src_flat[send_to * seg_count:(send_to + 1) * seg_count]
+            recv_seg = dest_flat[recv_from * seg_count:(recv_from + 1) * seg_count]
+            if step == 0:
+                np.copyto(recv_seg, send_seg)
+            else:
+                self.comm.Sendrecv(
+                    sendbuf=send_seg, dest=send_to,
+                    recvbuf=recv_seg, source=recv_from,
+                )
+                self.total_bytes_transferred += seg_bytes * 2

@@ -1,1 +1,3 @@
-Put discussion here for 2.1
+My myAllreduce slightly outperforms MPI's Allreduce, because at this small message size MPI's algorithm selection logic and internal collective overhead dominate any latency savings from a smarter pattern.
+
+For myAlltoall, we use a cyclic-shift schedule. At each step s each rank exchanges with (rank+s)%n on the send side and (rank-s)%n on the recv side, so every step pairs every rank with a distinct partner instead of having n-1 ranks all target rank i at once. This results in within ~16% of MPI. The gap comes from MPI internally pipelining with non-blocking primitives and from mpi4py's per-Sendrecv Python overhead accumulating across n-1 calls.

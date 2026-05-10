@@ -58,7 +58,19 @@ def get_info(
     part_out_dim : int
         The partitioned output dimension for the FC layer.
     """
-    #TODO: Your code here
+    mp_idx = rank % mp_size
+    dp_idx = rank // mp_size
+
+    mp_comm = comm.Split(color=dp_idx, key=rank)
+    dp_comm = comm.Split(color=mp_idx, key=rank)
+
+    if fc_layer in ("fc_q", "fc_k", "fc_v"):
+        part_in_dim = in_dim
+        part_out_dim = out_dim // mp_size
+    else:
+        part_in_dim = in_dim // mp_size
+        part_out_dim = out_dim
+
     return mp_idx, dp_idx, mp_comm, dp_comm, part_in_dim, part_out_dim
 
 def naive_collect_forward_input(
@@ -74,7 +86,12 @@ def naive_collect_forward_input(
     After gathering, the full input should have shape:
       (batch_size, seq_length, part_in_dim * mp_size)
     """
-    #TODO: Your code here
+    batch_size, seq_length, part_in_dim = x.shape
+    gathered = np.empty((mp_size, batch_size, seq_length, part_in_dim), dtype=x.dtype)
+    mp_comm.Allgather(np.ascontiguousarray(x), gathered)
+    collected_x = np.ascontiguousarray(
+        np.transpose(gathered, (1, 2, 0, 3))
+    ).reshape(batch_size, seq_length, mp_size * part_in_dim)
     return collected_x
 
 
@@ -94,7 +111,8 @@ def naive_collect_forward_output(
     the same shape:
       (batch_size, seq_length, out_dim)
     """
-    #TODO: Your code here
+    collected_out = np.empty_like(out)
+    mp_comm.Allreduce(np.ascontiguousarray(out), collected_out, op=MPI.SUM)
     return collected_out
 
 def naive_collect_backward_output(
@@ -124,10 +142,15 @@ def naive_collect_backward_output(
     Returns
     -------
     collected_output_grad : np.ndarray
-        The local output gradient for this MP node with shape 
+        The local output gradient for this MP node with shape
         (batch_size, seq_length, out_dim // mp_size).
     """
-    #TODO: Your code here
+    out_dim = output_grad.shape[2]
+    part_out_dim = out_dim // mp_size
+    start = mp_group_idx * part_out_dim
+    end = start + part_out_dim
+    collected_output_grad = output_grad[:, :, start:end]
+    return collected_output_grad
 
 
 def naive_collect_backward_x(
@@ -159,7 +182,18 @@ def naive_collect_backward_x(
     Returns
     -------
     collected_grad_x : np.ndarray
-        The reduced and scattered grad_x with shape 
+        The reduced and scattered grad_x with shape
         (batch_size, seq_length, in_dim // mp_size).
     """
-    #TODO: Your code here
+    batch_size, seq_length, in_dim = grad_x.shape
+    part_in_dim = in_dim // mp_size
+
+    reshaped = grad_x.reshape(batch_size, seq_length, mp_size, part_in_dim)
+    src = np.ascontiguousarray(np.transpose(reshaped, (2, 0, 1, 3)))
+
+    collected_grad_x = np.empty((batch_size, seq_length, part_in_dim), dtype=grad_x.dtype)
+    if hasattr(mp_comm, "Reduce_scatter_block"):
+        mp_comm.Reduce_scatter_block(src, collected_grad_x, op=MPI.SUM)
+    else:
+        mp_comm.Reduce_scatter(src, collected_grad_x, op=MPI.SUM)
+    return collected_grad_x
