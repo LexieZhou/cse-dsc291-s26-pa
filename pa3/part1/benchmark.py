@@ -48,27 +48,55 @@ def run_moe(moe_type, batch_size=8, feature_dim=32, hidden_dim=128,
     return outputs, avg_ms
 
 
-def benchmark_moe():
-    configs = [
-        # (batch, feature, hidden, output, topk)
-        (32, 64, 256, 64, 2),
-        (64, 64, 256, 64, 2),
-        (32, 128, 512, 128, 2),
-    ]
+def _print_header(title):
     if mpi.Get_rank() == 0:
-        print(f"world_size = {mpi.Get_size()}")
-        print(f"{'config':40}  {'simple':>10}  {'tp':>10}  {'ep':>10}")
+        print(f"\n=== {title} (world_size={mpi.Get_size()}) ===")
+        print(f"{'config':44}  {'simple':>10}  {'tp':>10}  {'ep':>10}")
 
-    for cfg in configs:
-        batch, feat, hidden, out, topk = cfg
-        kwargs = dict(batch_size=batch, feature_dim=feat, hidden_dim=hidden,
-                      output_dim=out, topk=topk)
-        _, t_simple = run_moe("simple", **kwargs)
-        _, t_tp = run_moe("tp", **kwargs)
-        _, t_ep = run_moe("ep", **kwargs)
-        if mpi.Get_rank() == 0:
-            tag = f"b={batch} d={feat} h={hidden} k={topk}"
-            print(f"{tag:40}  {t_simple:10.2f}  {t_tp:10.2f}  {t_ep:10.2f}")
+
+def _run_row(tag, **kwargs):
+    _, t_simple = run_moe("simple", **kwargs)
+    _, t_tp = run_moe("tp", **kwargs)
+    _, t_ep = run_moe("ep", **kwargs)
+    if mpi.Get_rank() == 0:
+        print(f"{tag:44}  {t_simple:10.2f}  {t_tp:10.2f}  {t_ep:10.2f}")
+
+
+def sweep_batch_size():
+    _print_header("Sweep: batch_size  (feat=64, hidden=256, out=64, topk=2)")
+    for batch in (8, 32, 128, 512, 2048):
+        _run_row(
+            f"batch={batch:<5}",
+            batch_size=batch, feature_dim=64, hidden_dim=256,
+            output_dim=64, topk=2,
+        )
+
+
+def sweep_hidden_dim():
+    _print_header("Sweep: hidden_dim  (batch=64, feat=64, out=64, topk=2)")
+    for hidden in (64, 256, 1024, 4096):
+        _run_row(
+            f"hidden={hidden:<5}",
+            batch_size=64, feature_dim=64, hidden_dim=hidden,
+            output_dim=64, topk=2,
+        )
+
+
+def sweep_topk():
+    _print_header("Sweep: topk  (batch=64, feat=64, hidden=256, out=64)")
+    ws = mpi.Get_size()
+    for topk in range(1, ws + 1):
+        _run_row(
+            f"topk={topk:<5}",
+            batch_size=64, feature_dim=64, hidden_dim=256,
+            output_dim=64, topk=topk,
+        )
+
+
+def benchmark_moe():
+    sweep_batch_size()
+    sweep_hidden_dim()
+    sweep_topk()
 
 
 if __name__ == "__main__":

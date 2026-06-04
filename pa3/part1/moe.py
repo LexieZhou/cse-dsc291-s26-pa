@@ -122,11 +122,13 @@ class ShardedLinear:
         if x.shape[0] == 0:
             return np.zeros((0, self.out_features_global), dtype=np.float32)
 
-        result = np.zeros((x.shape[0], self.out_features_global), dtype=np.float32)
+        local_out = np.dot(x, self.weight) + self.bias
 
-        # TODO (Part 1.1): compute this rank's partial output and use a
-        # collective so every rank ends up with the full
-        # (batch_size, out_features) result.
+        padded = np.zeros((x.shape[0], self.out_features_global), dtype=local_out.dtype)
+        padded[:, self.output_offset : self.output_offset + self.local_out_features] = local_out
+
+        result = np.empty_like(padded)
+        mpi.Allreduce(padded, result)
         return result
 
 
@@ -185,11 +187,16 @@ class MoE_TP:
         batch_size = x.shape[0]
         outputs = np.zeros((batch_size, self.output_dim))
 
-        # TODO (Part 1.1): implement the TP-style forward pass.
-        # 1. Get routing indices and gates from self.router(x, self.topk).
-        # 2. Run each routed token through its assigned expert and
-        #    gate-combine the results into `outputs`.
         indices, gates = self.router(x, self.topk)
+
+        for e in range(self.num_experts):
+            for k in range(self.topk):
+                mask = indices[:, k] == e
+                if not mask.any():
+                    continue
+                tokens = x[mask]
+                expert_out = self.experts[e](tokens)
+                outputs[mask] += gates[mask, k : k + 1] * expert_out
 
         return outputs
 
@@ -244,12 +251,45 @@ class MoE_EP:
         batch_size = x.shape[0]
         outputs = np.zeros((batch_size, self.output_dim))
 
-        # TODO (Part 1.2): implement the EP-style forward pass.
-        # 1. Get routing indices and gates from self.router(x, self.topk).
-        # 2. Send each token to the rank that owns its assigned expert.
-        # 3. Run this rank's local expert on the tokens it received.
-        # 4. Send the results back and gate-combine into `outputs`.
         indices, gates = self.router(x, self.topk)
+
+        for k in range(self.topk):
+            send_tokens = [[] for _ in range(self.world_size)]
+            send_positions = [[] for _ in range(self.world_size)]
+            for i in range(batch_size):
+                e = int(indices[i, k])
+                send_tokens[e].append(x[i])
+                send_positions[e].append(i)
+
+            send_arrays = [
+                np.stack(buf) if len(buf) > 0 else np.zeros((0, self.input_dim))
+                for buf in send_tokens
+            ]
+
+            recv_arrays = mpi.alltoall(send_arrays)
+            recv_counts = [r.shape[0] for r in recv_arrays]
+
+            if sum(recv_counts) > 0:
+                received = np.concatenate(recv_arrays, axis=0)
+                expert_out = self.expert(received)
+            else:
+                expert_out = np.zeros((0, self.output_dim))
+
+            send_back = []
+            offset = 0
+            for c in recv_counts:
+                send_back.append(expert_out[offset : offset + c])
+                offset += c
+
+            recv_back = mpi.alltoall(send_back)
+
+            for e in range(self.world_size):
+                positions = send_positions[e]
+                if not positions:
+                    continue
+                results = recv_back[e]
+                for j, pos in enumerate(positions):
+                    outputs[pos] += gates[pos, k] * results[j]
 
         return outputs
 
